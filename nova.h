@@ -969,6 +969,9 @@ int nova_assign_nvmm_entry(struct super_block *sb,
 	struct nova_inode_info_header *sih,
 	struct nova_file_write_entry *entry,
 	bool free);
+int nova_delete_cache_tree(struct super_block *sb,
+	struct nova_inode *pi, struct nova_inode_info_header *sih,
+	unsigned long start_blocknr, unsigned long last_blocknr);
 
 /* ioctl.c */
 extern long nova_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);

@@ -360,6 +360,38 @@ static int nova_open(struct inode *inode, struct file *filp)
 	return generic_file_open(inode, filp);
 }
 
+static int nova_munmap(struct file *file, struct vm_area_struct *vma,
+	loff_t start, loff_t end)
+{
+	struct address_space *mapping = file->f_mapping;
+	struct inode *inode = mapping->host;
+	struct super_block *sb = inode->i_sb;
+	struct nova_inode_info *si = NOVA_I(inode);
+	struct nova_inode_info_header *sih = &si->header;
+	struct nova_inode *pi;
+	unsigned long pgoff = vma->vm_pgoff;
+	size_t size = end - start;
+	unsigned long start_blocknr, end_blocknr;
+
+	pi = nova_get_inode(sb, inode);
+	if (mapping_mapped(mapping)) {
+		start = pgoff << PAGE_SHIFT;
+		end = start + size;
+		nova_dbgv("%s: start %lld, end %lld\n", __func__, start, end);
+		nova_fsync(file, start, end, 0);
+
+		mutex_lock(&inode->i_mutex);
+
+		/* Remove mapping pages */
+		start_blocknr = pgoff;
+		end_blocknr = end >> PAGE_SHIFT;
+		nova_delete_cache_tree(sb, pi, sih, start_blocknr, end_blocknr - 1);
+		mutex_unlock(&inode->i_mutex);
+	}
+
+	return 0;
+}
+
 #if 0
 static unsigned long
 nova_get_unmapped_area(struct file *file, unsigned long addr,
@@ -421,6 +453,7 @@ const struct file_operations nova_dax_file_operations = {
 	.read_iter		= generic_file_read_iter,
 	.write_iter		= generic_file_write_iter,
 	.mmap			= nova_dax_file_mmap,
+	.munmap			= nova_munmap,
 	.open			= nova_open,
 	.fsync			= nova_fsync,
 	.flush			= nova_flush,

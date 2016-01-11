@@ -198,7 +198,7 @@ static inline int nova_free_contiguous_blocks(struct super_block *sb,
 	return freed;
 }
 
-static int nova_delete_cache_tree(struct super_block *sb,
+int nova_delete_cache_tree(struct super_block *sb,
 	struct nova_inode *pi, struct nova_inode_info_header *sih,
 	unsigned long start_blocknr, unsigned long last_blocknr)
 {

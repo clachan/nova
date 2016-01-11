@@ -45,10 +45,10 @@ do_dax_mapping_read(struct file *filp, char __user *buf,
 	if (!isize)
 		goto out;
 
-	nova_dbg("%s: inode %lu, offset %lld, count %lu, size %lld\n",
+	nova_dbgv("%s: inode %lu, offset %lld, count %lu, size %lld\n",
 		__func__, inode->i_ino,	pos, len, isize);
 
-	nova_dbg("%s: inode %lu, mmap low %lu, high %lu, pages %lu\n",
+	nova_dbgv("%s: inode %lu, mmap low %lu, high %lu, pages %lu\n",
 		__func__, inode->i_ino,	sih->low_mmap, sih->high_mmap, sih->mmap_pages);
 
 	if (len > isize - pos)
@@ -324,7 +324,7 @@ ssize_t nova_mmap_write(struct file *filp,
 	total_blocks = num_blocks;
 	/* offset in the actual block size block */
 
-	nova_dbg("%s: inode %lu, offset %lld, count %lu\n",
+	nova_dbgv("%s: inode %lu, offset %lld, count %lu\n",
 			__func__, inode->i_ino,	pos, count);
 
 	while (num_blocks > 0) {
@@ -345,7 +345,7 @@ ssize_t nova_mmap_write(struct file *filp,
 			NOVA_START_TIMING(memcpy_w_nvmm_t, memcpy_time);
 			copied = bytes - memcpy_to_pmem_nocache(kmem + offset,
 							buf, bytes);
-			nova_dbg("%s: inode %lu, write to %lu\n", __func__, inode->i_ino, start_blk);
+			nova_dbgv("%s: inode %lu, write to %lu\n", __func__, inode->i_ino, start_blk);
 			NOVA_END_TIMING(memcpy_w_nvmm_t, memcpy_time);
 		} else
 			copied = bytes;
@@ -364,9 +364,11 @@ ssize_t nova_mmap_write(struct file *filp,
 			if (status >= 0)
 				status = -EFAULT;
 		}
-		if (status < 0)
-			break;
 
+		if (status < 0) {
+			ret = status;
+			break;
+		}
 	}
 
 	NOVA_END_TIMING(cow_write_t, cow_write_time);
@@ -442,7 +444,7 @@ ssize_t nova_cow_file_write(struct file *filp,
 	inode->i_ctime = inode->i_mtime = CURRENT_TIME_SEC;
 	time = CURRENT_TIME_SEC.tv_sec;
 
-	nova_dbg("%s: inode %lu, offset %lld, count %lu, O_DIRECT %d\n",
+	nova_dbgv("%s: inode %lu, offset %lld, count %lu, O_DIRECT %d\n",
 			__func__, inode->i_ino,	pos, count, filp->f_flags & O_DIRECT);
 
 	if (sih->mmap_pages && ((filp->f_flags & O_DIRECT) == 0))
@@ -840,8 +842,10 @@ static int nova_get_mmap_addr(struct inode *inode, struct vm_area_struct *vma,
 			sih->high_mmap = pgoff;
 //	}
 
-	nova_dbg("DAX mmap: inode %lu, pgoff %lu, offset %lu, nvmm %d, mmap pages %lu, low %lu, high %lu\n",
-			sih->ino, pgoff, pgoff << PAGE_SHIFT, nvmm ? 1: 0, sih->mmap_pages, sih->low_mmap, sih->high_mmap);
+	nova_dbgv("DAX mmap: inode %lu, pgoff %lu, offset %lu, nvmm %d, "
+			"mmap pages %lu, low %lu, high %lu\n",
+			sih->ino, pgoff, pgoff << PAGE_SHIFT, nvmm ? 1 : 0,
+			sih->mmap_pages, sih->low_mmap, sih->high_mmap);
 
 	return ret;
 }
