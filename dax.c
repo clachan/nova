@@ -450,9 +450,9 @@ ssize_t nova_cow_file_write(struct file *filp,
 	nova_dbgv("%s: inode %lu, offset %lld, count %lu, O_DIRECT %d\n",
 			__func__, inode->i_ino,	pos, count, filp->f_flags & O_DIRECT);
 
-	if (sih->mmap_pages && ((filp->f_flags & O_DIRECT) == 0))
+//	if (sih->mmap_pages && ((filp->f_flags & O_DIRECT) == 0))
 //	if (sih->mmap_pages)
-		nova_mmap_write(filp, buf, len, pos);
+//		nova_mmap_write(filp, buf, len, pos);
 
 	temp_tail = pi->log_tail;
 	while (num_blocks > 0) {
