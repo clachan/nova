@@ -64,18 +64,6 @@ do_dax_mapping_read(struct file *filp, char __user *buf,
 		void *dax_mem = NULL;
 		int zero = 0;
 
-		if (sih->mmap_pages && index <= sih->high_mmap &&
-				index >= sih->low_mmap) {
-			nvmm = (unsigned long)radix_tree_lookup(&sih->cache_tree,
-								index);
-			if (nvmm) {
-				dax_mem = nova_get_block(sb, nvmm);
-				nr = PAGE_SIZE;
-				nova_dbg("inode %lu reads from mmap page %lu\n", inode->i_ino, index);
-				goto memcpy;
-			}
-		}
-
 		/* nr is the maximum number of bytes to copy from this page */
 		if (index >= end_index) {
 			if (index > end_index)
@@ -85,6 +73,21 @@ do_dax_mapping_read(struct file *filp, char __user *buf,
 				goto out;
 			}
 		}
+
+#if 0
+		if (sih->mmap_pages && index <= sih->high_mmap &&
+				index >= sih->low_mmap) {
+			nvmm = (unsigned long)radix_tree_lookup(&sih->cache_tree,
+								index);
+			if (nvmm) {
+				dax_mem = nova_get_block(sb, nvmm);
+				nr = PAGE_SIZE;
+				nova_dbgv("inode %lu reads from mmap page %lu\n",
+						inode->i_ino, index);
+				goto memcpy;
+			}
+		}
+#endif
 
 		entry = nova_get_write_entry(sb, si, index);
 		if (unlikely(entry == NULL)) {
