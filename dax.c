@@ -45,8 +45,11 @@ do_dax_mapping_read(struct file *filp, char __user *buf,
 	if (!isize)
 		goto out;
 
-	nova_dbgv("%s: inode %lu, offset %lld, count %lu, size %lld\n",
+	nova_dbg("%s: inode %lu, offset %lld, count %lu, size %lld\n",
 		__func__, inode->i_ino,	pos, len, isize);
+
+	nova_dbg("%s: inode %lu, mmap low %lu, high %lu, pages %lu\n",
+		__func__, inode->i_ino,	sih->low_mmap, sih->high_mmap, sih->mmap_pages);
 
 	if (len > isize - pos)
 		len = isize - pos;
@@ -60,6 +63,18 @@ do_dax_mapping_read(struct file *filp, char __user *buf,
 		unsigned long nvmm;
 		void *dax_mem = NULL;
 		int zero = 0;
+
+		if (sih->mmap_pages && index <= sih->high_mmap &&
+				index >= sih->low_mmap) {
+			nvmm = (unsigned long)radix_tree_lookup(&sih->cache_tree,
+								index);
+			if (nvmm) {
+				dax_mem = nova_get_block(sb, nvmm);
+				nr = PAGE_SIZE;
+				nova_dbg("inode %lu reads from mmap page %lu\n", inode->i_ino, index);
+				goto memcpy;
+			}
+		}
 
 		/* nr is the maximum number of bytes to copy from this page */
 		if (index >= end_index) {
@@ -276,6 +291,89 @@ int nova_reassign_file_btree(struct super_block *sb,
 	return 0;
 }
 
+ssize_t nova_mmap_write(struct file *filp,
+	const char __user *buf,	size_t len, loff_t pos)
+{
+	struct address_space *mapping = filp->f_mapping;
+	struct inode    *inode = mapping->host;
+	struct nova_inode_info *si = NOVA_I(inode);
+	struct nova_inode_info_header *sih = &si->header;
+	struct super_block *sb = inode->i_sb;
+	struct nova_inode *pi;
+	ssize_t     written = 0;
+	size_t count, offset, copied, ret;
+	unsigned long start_blk, num_blocks;
+	unsigned long total_blocks;
+	unsigned long nvmm;
+	void* kmem = NULL;
+	size_t bytes;
+	long status = 0;
+	timing_t cow_write_time, memcpy_time;
+
+	NOVA_START_TIMING(cow_write_t, cow_write_time);
+
+	if (filp->f_flags & O_APPEND)
+		pos = i_size_read(inode);
+
+	count = len;
+
+	pi = nova_get_inode(sb, inode);
+
+	offset = pos & (sb->s_blocksize - 1);
+	num_blocks = ((count + offset - 1) >> sb->s_blocksize_bits) + 1;
+	total_blocks = num_blocks;
+	/* offset in the actual block size block */
+
+	nova_dbg("%s: inode %lu, offset %lld, count %lu\n",
+			__func__, inode->i_ino,	pos, count);
+
+	while (num_blocks > 0) {
+		offset = pos & (nova_inode_blk_size(pi) - 1);
+		start_blk = pos >> sb->s_blocksize_bits;
+
+		nvmm = (unsigned long)radix_tree_lookup(&sih->cache_tree,
+								start_blk);
+
+		bytes = sb->s_blocksize - offset;
+		if (bytes > count)
+			bytes = count;
+
+		/* Now copy from user buf */
+//		nova_dbg("Write: %p\n", kmem);
+		if (nvmm) {
+			kmem = nova_get_block(sb, nvmm);
+			NOVA_START_TIMING(memcpy_w_nvmm_t, memcpy_time);
+			copied = bytes - memcpy_to_pmem_nocache(kmem + offset,
+							buf, bytes);
+			nova_dbg("%s: inode %lu, write to %lu\n", __func__, inode->i_ino, start_blk);
+			NOVA_END_TIMING(memcpy_w_nvmm_t, memcpy_time);
+		} else
+			copied = bytes;
+
+		if (copied > 0) {
+			status = copied;
+			written += copied;
+			pos += copied;
+			buf += copied;
+			count -= copied;
+			num_blocks -= 1;
+		}
+		if (unlikely(copied != bytes)) {
+			nova_dbg("%s ERROR!: %p, bytes %lu, copied %lu\n",
+				__func__, kmem, bytes, copied);
+			if (status >= 0)
+				status = -EFAULT;
+		}
+		if (status < 0)
+			break;
+
+	}
+
+	NOVA_END_TIMING(cow_write_t, cow_write_time);
+	cow_write_bytes += written;
+	return 0;
+}
+
 ssize_t nova_cow_file_write(struct file *filp,
 	const char __user *buf,	size_t len, loff_t *ppos, bool need_mutex)
 {
@@ -344,8 +442,11 @@ ssize_t nova_cow_file_write(struct file *filp,
 	inode->i_ctime = inode->i_mtime = CURRENT_TIME_SEC;
 	time = CURRENT_TIME_SEC.tv_sec;
 
-	nova_dbgv("%s: inode %lu, offset %lld, count %lu\n",
+	nova_dbg("%s: inode %lu, offset %lld, count %lu\n",
 			__func__, inode->i_ino,	pos, count);
+
+	if (sih->mmap_pages)
+		nova_mmap_write(filp, buf, len, pos);
 
 	temp_tail = pi->log_tail;
 	while (num_blocks > 0) {
@@ -697,6 +798,9 @@ static int nova_get_nvmm_pfn(struct super_block *sb, struct nova_inode *pi,
 			return ret;
 		}
 
+	nova_dbg("DAX mmap: inode %lu, pgoff %lu, offset %lu, nvmm %d, mmap pages %lu, low %lu, high %lu\n",
+			sih->ino, pgoff, pgoff << PAGE_SHIFT, nvmm ? 1: 0, sih->mmap_pages, sih->low_mmap, sih->high_mmap);
+
 		sih->mmap_pages++;
 		if (nvmm) {
 			/* Copy from NVMM to dram */
@@ -731,12 +835,12 @@ static int nova_get_mmap_addr(struct inode *inode, struct vm_area_struct *vma,
 	ret = nova_get_nvmm_pfn(sb, pi, si, nvmm, pgoff, vm_flags,
 						kmem, pfn);
 
-	if (vm_flags & VM_WRITE) {
+//	if (vm_flags & VM_WRITE) {
 		if (pgoff < sih->low_mmap)
 			sih->low_mmap = pgoff;
 		if (pgoff > sih->high_mmap)
 			sih->high_mmap = pgoff;
-	}
+//	}
 
 	return ret;
 }

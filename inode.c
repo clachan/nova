@@ -1127,7 +1127,7 @@ static void nova_setsize(struct inode *inode, loff_t oldsize, loff_t newsize)
 		return;
 	}
 
-	nova_dbgv("%s: inode %lu, old size %llu, new size %llu\n",
+	nova_dbg("%s: inode %lu, old size %llu, new size %llu\n",
 		__func__, inode->i_ino, oldsize, newsize);
 
 	if (newsize != oldsize) {

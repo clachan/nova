@@ -2,6 +2,7 @@
 
 echo "Unmount existing partition..."
 umount /mnt/ramdisk
+umount /mnt/scratch
 rmmod nova
 insmod nova.ko measure_timing=0
 
