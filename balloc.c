@@ -278,7 +278,6 @@ static int nova_free_blocks(struct super_block *sb, unsigned long blocknr,
 	struct free_list *free_list;
 	unsigned long step = 0;
 	int cpuid;
-	int new_node_used = 0;
 	int ret;
 
 	if (num <= 0) {
@@ -289,13 +288,6 @@ static int nova_free_blocks(struct super_block *sb, unsigned long blocknr,
 	cpuid = blocknr / sbi->per_list_blocks;
 	if (cpuid >= sbi->cpus)
 		cpuid = SHARED_CPU;
-
-	/* Pre-allocate blocknode */
-	curr_node = nova_alloc_blocknode(sb);
-	if (curr_node == NULL) {
-		/* returning without freeing the block*/
-		return -ENOMEM;
-	}
 
 	free_list = nova_get_free_list(sb, cpuid);
 	mutex_lock(&free_list->s_lock);
@@ -314,7 +306,6 @@ static int nova_free_blocks(struct super_block *sb, unsigned long blocknr,
 	if (ret) {
 		nova_dbg("%s: find free slot fail: %d\n", __func__, ret);
 		mutex_unlock(&free_list->s_lock);
-		nova_free_blocknode(sb, curr_node);
 		return ret;
 	}
 
@@ -339,12 +330,17 @@ static int nova_free_blocks(struct super_block *sb, unsigned long blocknr,
 	}
 
 	/* Aligns somewhere in the middle */
+	curr_node = nova_alloc_blocknode(sb);
+	if (curr_node == NULL) {
+		/* returning without freeing the block*/
+		goto out;
+	}
+
 	curr_node->range_low = block_low;
 	curr_node->range_high = block_high;
-	new_node_used = 1;
 	ret = nova_insert_blocktree(sbi, tree, curr_node);
 	if (ret) {
-		new_node_used = 0;
+		nova_free_blocknode(sb, curr_node);
 		goto out;
 	}
 	if (!prev)
@@ -364,8 +360,6 @@ block_found:
 
 out:
 	mutex_unlock(&free_list->s_lock);
-	if (new_node_used == 0)
-		nova_free_blocknode(sb, curr_node);
 	free_steps += step;
 
 	return ret;
