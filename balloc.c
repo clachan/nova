@@ -41,7 +41,7 @@ int nova_alloc_block_free_lists(struct super_block *sb)
 	for (i = 0; i < sbi->cpus; i++) {
 		free_list = nova_get_free_list(sb, i);
 		free_list->block_free_tree = RB_ROOT;
-		spin_lock_init(&free_list->s_lock);
+		mutex_init(&free_list->s_lock);
 	}
 
 	return 0;
@@ -298,7 +298,7 @@ static int nova_free_blocks(struct super_block *sb, unsigned long blocknr,
 	}
 
 	free_list = nova_get_free_list(sb, cpuid);
-	spin_lock(&free_list->s_lock);
+	mutex_lock(&free_list->s_lock);
 
 	tree = &(free_list->block_free_tree);
 
@@ -313,7 +313,7 @@ static int nova_free_blocks(struct super_block *sb, unsigned long blocknr,
 
 	if (ret) {
 		nova_dbg("%s: find free slot fail: %d\n", __func__, ret);
-		spin_unlock(&free_list->s_lock);
+		mutex_unlock(&free_list->s_lock);
 		nova_free_blocknode(sb, curr_node);
 		return ret;
 	}
@@ -363,7 +363,7 @@ block_found:
 	}
 
 out:
-	spin_unlock(&free_list->s_lock);
+	mutex_unlock(&free_list->s_lock);
 	if (new_node_used == 0)
 		nova_free_blocknode(sb, curr_node);
 	free_steps += step;
@@ -522,7 +522,7 @@ static int nova_new_blocks(struct super_block *sb, unsigned long *blocknr,
 
 retry:
 	free_list = nova_get_free_list(sb, cpuid);
-	spin_lock(&free_list->s_lock);
+	mutex_lock(&free_list->s_lock);
 
 	if (free_list->num_free_blocks < num_blocks || !free_list->first_node) {
 		nova_dbgv("%s: cpu %d, free_blocks %lu, required %lu, "
@@ -536,7 +536,7 @@ retry:
 			first = container_of(temp, struct nova_range_node, node);
 			free_list->first_node = first;
 		} else {
-			spin_unlock(&free_list->s_lock);
+			mutex_unlock(&free_list->s_lock);
 			if (retried >= 3)
 				return -ENOMEM;
 			cpuid = nova_get_candidate_free_list(sb);
@@ -556,7 +556,7 @@ retry:
 		free_list->alloc_data_pages += ret_blocks;
 	}
 
-	spin_unlock(&free_list->s_lock);
+	mutex_unlock(&free_list->s_lock);
 
 	if (ret_blocks <= 0 || new_blocknr == 0)
 		return -ENOSPC;

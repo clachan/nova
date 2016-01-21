@@ -338,7 +338,7 @@ struct scan_bitmap {
 };
 
 struct free_list {
-	spinlock_t s_lock;
+	struct mutex	s_lock;
 	struct rb_root	block_free_tree;
 	struct nova_range_node *first_node;
 	unsigned long	block_start;
