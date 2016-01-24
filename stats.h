@@ -42,8 +42,8 @@ enum timing_category {
 	mknod_t,
 	rename_t,
 	readdir_t,
-	add_entry_t,
-	remove_entry_t,
+	add_dentry_t,
+	remove_dentry_t,
 	setattr_t,
 
 	/* I/O operations */
@@ -73,7 +73,8 @@ enum timing_category {
 	append_file_entry_t,
 	append_link_change_t,
 	append_setattr_t,
-	log_gc_t,
+	fast_gc_t,
+	thorough_gc_t,
 	check_invalid_t,
 
 	/* Others */
@@ -103,8 +104,10 @@ extern u64 Countstats[TIMING_NUM];
 extern unsigned long long read_bytes;
 extern unsigned long long cow_write_bytes;
 extern unsigned long long fsync_bytes;
-extern unsigned long long checked_pages;
-extern unsigned long gc_pages;
+extern unsigned long long fast_checked_pages;
+extern unsigned long long thorough_checked_pages;
+extern unsigned long fast_gc_pages;
+extern unsigned long thorough_gc_pages;
 extern unsigned long fsync_pages;
 
 typedef struct timespec timing_t;

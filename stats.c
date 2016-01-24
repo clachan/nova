@@ -42,8 +42,8 @@ const char *Timingstring[TIMING_NUM] =
 	"mknod",
 	"rename",
 	"readdir",
-	"add_entry",
-	"remove_entry",
+	"add_dentry",
+	"remove_dentry",
 	"setattr",
 
 	"dax_read",
@@ -68,7 +68,8 @@ const char *Timingstring[TIMING_NUM] =
 	"append_file_entry",
 	"append_link_change",
 	"append_setattr",
-	"inode_log_gc",
+	"log_fast_gc",
+	"log_thorough_gc",
 	"check_invalid_log",
 
 	"find_cache_page",
@@ -96,8 +97,10 @@ unsigned long write_breaks;
 unsigned long long read_bytes;
 unsigned long long cow_write_bytes;
 unsigned long long fsync_bytes;
-unsigned long long checked_pages;
-unsigned long gc_pages;
+unsigned long long fast_checked_pages;
+unsigned long long thorough_checked_pages;
+unsigned long fast_gc_pages;
+unsigned long thorough_gc_pages;
 unsigned long fsync_pages;
 
 void nova_print_alloc_stats(struct super_block *sb)
@@ -123,13 +126,15 @@ void nova_print_alloc_stats(struct super_block *sb)
 		Countstats[free_data_t], free_steps,
 		Countstats[free_data_t] ?
 			free_steps / Countstats[free_data_t] : 0);
-	printk("Garbage collection %llu, check pages %llu, average %llu,\n"
-		"free pages %lu, average %llu\n",
-		Countstats[log_gc_t], checked_pages,
-		Countstats[log_gc_t] ?
-			checked_pages / Countstats[log_gc_t] : 0,
-		gc_pages, Countstats[log_gc_t] ?
-			gc_pages / Countstats[log_gc_t] : 0);
+	printk("Fast GC %llu, check pages %llu, free pages %lu, average %llu\n",
+		Countstats[fast_gc_t], fast_checked_pages,
+		fast_gc_pages, Countstats[fast_gc_t] ?
+			fast_gc_pages / Countstats[fast_gc_t] : 0);
+	printk("Thorough GC %llu, checked pages %llu, free pages %lu, "
+		"average %llu\n", Countstats[thorough_gc_t],
+		thorough_checked_pages, thorough_gc_pages,
+		Countstats[thorough_gc_t] ?
+			thorough_gc_pages / Countstats[thorough_gc_t] : 0);
 
 	for (i = 0; i < sbi->cpus; i++) {
 		free_list = nova_get_free_list(sb, i);
@@ -213,7 +218,7 @@ void nova_clear_stats(void)
 static inline void nova_print_file_write_entry(struct super_block *sb,
 	u64 curr, struct nova_file_write_entry *entry)
 {
-	nova_dbg("file write entry @ 0x%llx: page offset %u, pages %u, "
+	nova_dbg("file write entry @ 0x%llx: paoff %llu, pages %u, "
 			"blocknr %llu, invalid count %u, size %llu\n",
 			curr, entry->pgoff, entry->num_pages,
 			entry->block >> PAGE_SHIFT,
@@ -234,8 +239,8 @@ static inline void nova_print_link_change_entry(struct super_block *sb,
 			curr, entry->links, entry->flags);
 }
 
-static inline size_t nova_print_dir_logentry(struct super_block *sb,
-	u64 curr, struct nova_dir_logentry *entry)
+static inline size_t nova_print_dentry(struct super_block *sb,
+	u64 curr, struct nova_dentry *entry)
 {
 	nova_dbg("dir logentry @ 0x%llx: inode %llu, "
 			"namelen %u, rec len %u\n", curr,
@@ -267,7 +272,7 @@ static u64 nova_print_log_entry(struct super_block *sb, u64 curr)
 			curr += sizeof(struct nova_file_write_entry);
 			break;
 		case DIR_LOG:
-			size = nova_print_dir_logentry(sb, curr, addr);
+			size = nova_print_dentry(sb, curr, addr);
 			curr += size;
 			break;
 		default:

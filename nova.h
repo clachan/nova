@@ -119,7 +119,7 @@ extern unsigned int nova_dbgmask;
 #define	NOVA_PRINT_FREE_LISTS		0xBCD00018
 
 
-#define	READDIR_END			(LONG_MAX)
+#define	READDIR_END			(ULONG_MAX)
 #define	INVALID_CPU			(-1)
 #define	SHARED_CPU			(65536)
 #define FREE_BATCH			(16)
@@ -155,11 +155,10 @@ static inline void nova_set_entry_type(void *p, enum nova_entry_type type)
 	*(u8 *)p = type;
 }
 
-/* Make sure this is 32 bytes */
 struct nova_file_write_entry {
 	/* ret of find_nvmm_block, the lowest byte is entry type */
 	__le64	block;
-	__le32	pgoff;
+	__le64	pgoff;
 	__le32	num_pages;
 	__le32	invalid_pages;
 	/* For both ctime and mtime */
@@ -174,43 +173,40 @@ struct nova_inode_page_tail {
 	__le64	next_page;
 } __attribute((__packed__));
 
-#define	ENTRIES_PER_PAGE	127
+#define	LAST_ENTRY	4064
+#define	PAGE_TAIL(p)	(((p) & ~INVALID_MASK) + LAST_ENTRY)
 
 /* Fit in PAGE_SIZE */
 struct	nova_inode_log_page {
-	struct nova_file_write_entry entries[ENTRIES_PER_PAGE];
+	char padding[LAST_ENTRY];
 	struct nova_inode_page_tail page_tail;
 } __attribute((__packed__));
 
-#define	LAST_ENTRY	4064
-#define	PAGE_TAIL(p)	(((p) & ~INVALID_MASK) + LAST_ENTRY)
+#define	EXTEND_THRESHOLD	256
 
 /*
  * Structure of a directory log entry in NOVA.
  * Update DIR_LOG_REC_LEN if modify this struct!
  */
-struct nova_dir_logentry {
+struct nova_dentry {
 	u8	entry_type;
-	u8	name_len;               /* length of the directory entry name */
+	u8	name_len;               /* length of the dentry name */
 	u8	file_type;              /* file type */
-	u8	new_inode;		/* Followed by a new inode? */
-	__le16	de_len;                 /* length of this directory entry */
+	u8	invalid;		/* Invalid now? */
+	__le16	de_len;                 /* length of this dentry */
 	__le16	links_count;
 	__le32	mtime;			/* For both mtime and ctime */
 	__le64	ino;                    /* inode no pointed to by this entry */
 	__le64	size;
-	char	name[NOVA_NAME_LEN];	/* File name */
+	char	name[NOVA_NAME_LEN + 1];	/* File name */
 } __attribute((__packed__));
 
-#define NOVA_DIR_PAD            32	/* Align to log entry size */
-#define NOVA_DIR_ROUND          (NOVA_DIR_PAD - 1)
-#define NOVA_DIR_LOG_REC_LEN(name_len)  (((name_len) + 28 + NOVA_DIR_ROUND) & \
+#define NOVA_DIR_PAD			4	/* Align to 4 bytes boundary */
+#define NOVA_DIR_ROUND			(NOVA_DIR_PAD - 1)
+#define NOVA_DIR_LOG_REC_LEN(name_len)	(((name_len) + 29 + NOVA_DIR_ROUND) & \
 				      ~NOVA_DIR_ROUND)
 
-/*
- * Struct of inode attributes change log (setattr)
- * Make sure it is 32 bytes.
- */
+/* Struct of inode attributes change log (setattr) */
 struct nova_setattr_logentry {
 	u8	entry_type;
 	u8	attr;
@@ -307,13 +303,16 @@ struct nova_inode_info_header {
 	struct radix_tree_root tree;	/* Dir name entry tree root */
 	struct radix_tree_root cache_tree;	/* Mmap cache tree root */
 	unsigned short i_mode;		/* Dir or file? */
-	unsigned long log_pages;		/* Num of log pages */
+	unsigned long log_pages;	/* Num of log pages */
 	unsigned long i_size;
 	unsigned long ino;
 	unsigned long pi_addr;
 	unsigned long mmap_pages;	/* Num of mmap pages */
 	unsigned long low_mmap;		/* Mmap low range */
 	unsigned long high_mmap;	/* Mmap high range */
+	unsigned long valid_bytes;	/* For thorough GC */
+	u64 last_setattr;		/* Last setattr entry */
+	u64 last_link_change;		/* Last link change entry */
 };
 
 struct nova_inode_info {
@@ -533,17 +532,17 @@ struct inode_table *nova_get_inode_table(struct super_block *sb, int cpu)
 }
 
 // BKDR String Hash Function
-static inline unsigned int BKDRHash(const char *str, int length)
+static inline unsigned long BKDRHash(const char *str, int length)
 {
 	unsigned int seed = 131; // 31 131 1313 13131 131313 etc..
-	unsigned int hash = 0;
+	unsigned long hash = 0;
 	int i;
 
 	for (i = 0; i < length; i++) {
 		hash = hash * seed + (*str++);
 	}
 
-	return (hash & 0x7FFFFFFF);
+	return hash;
 }
 
 /* uses CPU instructions to atomically write up to 8 bytes */
@@ -654,7 +653,7 @@ static inline unsigned long get_nvmm(struct super_block *sb,
 
 		curr = nova_get_addr_off(sbi, data);
 		nova_dbg("Entry ERROR: inode %lu, curr 0x%llx, pgoff %lu, "
-			"entry pgoff %u, num %u\n", sih->ino,
+			"entry pgoff %llu, num %u\n", sih->ino,
 			curr, pgoff, data->pgoff, data->num_pages);
 		pi = nova_get_block(sb, sih->pi_addr);
 		nova_print_nova_log_pages(sb, sih, pi);
@@ -804,12 +803,13 @@ static inline bool is_last_entry(u64 curr_p, size_t size)
 	return entry_end > LAST_ENTRY;
 }
 
-static inline bool is_last_dir_entry(struct super_block *sb, u64 curr_p)
+static inline bool goto_next_page(struct super_block *sb, u64 curr_p)
 {
 	void *addr;
 	u8 type;
 
-	if (ENTRY_LOC(curr_p) + NOVA_DIR_LOG_REC_LEN(0) > LAST_ENTRY)
+	/* Each kind of entry takes at least 32 bytes */
+	if (ENTRY_LOC(curr_p) + 32 > LAST_ENTRY)
 		return true;
 
 	addr = nova_get_block(sb, curr_p);
@@ -821,7 +821,7 @@ static inline bool is_last_dir_entry(struct super_block *sb, u64 curr_p)
 }
 
 static inline int is_dir_init_entry(struct super_block *sb,
-	struct nova_dir_logentry *entry)
+	struct nova_dentry *entry)
 {
 	if (entry->name_len == 1 && strncmp(entry->name, ".", 1) == 0)
 		return 1;
@@ -902,15 +902,15 @@ int nova_dax_file_mmap(struct file *file, struct vm_area_struct *vma);
 extern const struct file_operations nova_dir_operations;
 int nova_append_dir_init_entries(struct super_block *sb,
 	struct nova_inode *pi, u64 self_ino, u64 parent_ino);
-extern int nova_add_entry(struct dentry *dentry, u64 ino,
+extern int nova_add_dentry(struct dentry *dentry, u64 ino,
 	int inc_link, u64 tail, u64 *new_tail);
-extern int nova_remove_entry(struct dentry *dentry, int dec_link, u64 tail,
+extern int nova_remove_dentry(struct dentry *dentry, int dec_link, u64 tail,
 	u64 *new_tail);
 void nova_print_dir_tree(struct super_block *sb,
 	struct nova_inode_info_header *sih, unsigned long ino);
 void nova_delete_dir_tree(struct super_block *sb,
 	struct nova_inode_info_header *sih);
-struct nova_dir_logentry *nova_find_dir_logentry(struct super_block *sb,
+struct nova_dentry *nova_find_dentry(struct super_block *sb,
 	struct nova_inode *pi, struct inode *inode, const char *name,
 	unsigned long name_len);
 int nova_rebuild_dir_inode_tree(struct super_block *sb,
@@ -921,8 +921,6 @@ int nova_rebuild_dir_inode_tree(struct super_block *sb,
 extern const struct inode_operations nova_file_inode_operations;
 extern const struct file_operations nova_dax_file_operations;
 int nova_fsync(struct file *file, loff_t start, loff_t end, int datasync);
-int nova_is_page_dirty(struct mm_struct *mm, unsigned long address,
-	int category, int set_clean);
 
 /* inode.c */
 extern const struct address_space_operations nova_aops_dax;
@@ -948,18 +946,15 @@ extern unsigned long nova_find_region(struct inode *inode, loff_t *offset,
 void nova_apply_setattr_entry(struct super_block *sb, struct nova_inode *pi,
 	struct nova_inode_info_header *sih,
 	struct nova_setattr_logentry *entry);
-u64 nova_extend_inode_log(struct super_block *sb, struct nova_inode *pi,
-	struct nova_inode_info_header *sih, u64 curr_p, int is_file);
 void nova_free_inode_log(struct super_block *sb, struct nova_inode *pi);
 int nova_allocate_inode_log_pages(struct super_block *sb,
 	struct nova_inode *pi, unsigned long num_pages,
 	u64 *new_block);
 int nova_delete_file_tree(struct super_block *sb,
 	struct nova_inode_info_header *sih, unsigned long start_blocknr,
-	unsigned long last_blocknr, bool delete_nvmm);
+	unsigned long last_blocknr, bool delete_nvmm, bool delete_mmap);
 u64 nova_get_append_head(struct super_block *sb, struct nova_inode *pi,
-	struct nova_inode_info_header *sih, u64 tail, size_t size,
-	int is_file);
+	struct nova_inode_info_header *sih, u64 tail, size_t size);
 u64 nova_append_file_write_entry(struct super_block *sb, struct nova_inode *pi,
 	struct inode *inode, struct nova_file_write_entry *data, u64 tail);
 int nova_rebuild_file_inode_tree(struct super_block *sb,
@@ -969,13 +964,11 @@ u64 nova_new_nova_inode(struct super_block *sb, u64 *pi_addr);
 extern struct inode *nova_new_vfs_inode(enum nova_new_inode_type,
 	struct inode *dir, u64 pi_addr, u64 ino, umode_t mode,
 	size_t size, dev_t rdev, const struct qstr *qstr);
-int nova_assign_nvmm_entry(struct super_block *sb,
+int nova_assign_write_entry(struct super_block *sb,
 	struct nova_inode *pi,
 	struct nova_inode_info_header *sih,
 	struct nova_file_write_entry *entry,
 	bool free);
-int nova_free_dram_resource(struct super_block *sb,
-	struct nova_inode_info_header *sih);
 
 /* ioctl.c */
 extern long nova_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
