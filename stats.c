@@ -90,6 +90,9 @@ u64 Countstats[TIMING_NUM];
 unsigned long alloc_steps;
 unsigned long free_steps;
 unsigned long write_breaks;
+unsigned long readdir_pages;
+unsigned long readdir_dentries;
+unsigned long readdir_valid_dentries;
 unsigned long long read_bytes;
 unsigned long long cow_write_bytes;
 unsigned long long fsync_bytes;
@@ -177,6 +180,9 @@ void nova_print_IO_stats(struct super_block *sb)
 		Countstats[copy_to_nvmm_t] ?
 			fsync_bytes / Countstats[copy_to_nvmm_t] : 0);
 	printk("Fsync %lu pages\n", fsync_pages);
+	printk("Readdir count %llu, pages %lu, dentries %lu, valid %lu\n",
+		Countstats[readdir_t], readdir_pages, readdir_dentries,
+		readdir_valid_dentries);
 }
 
 void nova_print_timing_stats(struct super_block *sb)
@@ -224,6 +230,8 @@ void nova_clear_stats(void)
 	fast_gc_pages = 0;
 	thorough_gc_pages = 0;
 	fsync_pages = 0;
+	readdir_pages = 0;
+	readdir_dentries = 0;
 	barriers = 0;
 }
 

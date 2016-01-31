@@ -620,9 +620,12 @@ static int nova_readdir_fast(struct file *file, struct dir_context *ctx)
 
 	curr_p = pos;
 	while (curr_p != pidir->log_tail) {
-		if (goto_next_page(sb, curr_p))
+		if (goto_next_page(sb, curr_p)) {
 			curr_p = next_log_page(sb, curr_p);
+			readdir_pages++;
+		}
 
+		readdir_dentries++;
 		if (curr_p == 0) {
 			nova_err(sb, "Dir %lu log is NULL!\n", inode->i_ino);
 			BUG();
@@ -675,6 +678,7 @@ static int nova_readdir_fast(struct file *file, struct dir_context *ctx)
 				return 0;
 			}
 			ctx->pos = curr_p + de_len;
+			readdir_valid_dentries++;
 		}
 
 		if (ret) {
