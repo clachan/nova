@@ -564,10 +564,136 @@ out:
 	return 0;
 }
 
+static int nova_readdir_fast(struct file *file, struct dir_context *ctx)
+{
+	struct inode *inode = file_inode(file);
+	struct super_block *sb = inode->i_sb;
+	struct nova_inode *pidir;
+	struct nova_inode_info *si = NOVA_I(inode);
+	struct nova_inode_info_header *sih = &si->header;
+	struct nova_inode *child_pi;
+	struct nova_dentry *entry = NULL;
+	unsigned short de_len;
+	u64 pi_addr;
+	unsigned long pos = 0;
+	ino_t ino;
+	void *addr;
+	u64 curr_p;
+	u8 type;
+	int ret;
+	timing_t readdir_time;
+
+	NOVA_START_TIMING(readdir_t, readdir_time);
+	pidir = nova_get_inode(sb, inode);
+	nova_dbgv("%s: ino %llu, size %llu, pos 0x%llx\n",
+			__func__, (u64)inode->i_ino,
+			pidir->i_size, ctx->pos);
+
+	if (!sih) {
+		nova_dbg("%s: inode %lu sih does not exist!\n",
+				__func__, inode->i_ino);
+		ctx->pos = READDIR_END;
+		return 0;
+	}
+
+	pos = ctx->pos;
+	if (pos == pidir->log_tail)
+		goto out;
+
+	if (pos == 0)
+		pos = pidir->log_head;
+
+	curr_p = pidir->log_head;
+	if (curr_p == 0) {
+		nova_err(sb, "Dir %lu log is NULL!\n", inode->i_ino);
+		BUG();
+	}
+
+	nova_dbgv("Log head 0x%llx, tail 0x%llx\n",
+				curr_p, pidir->log_tail);
+
+	while (pos >> PAGE_SHIFT != curr_p >> PAGE_SHIFT) {
+		curr_p = next_log_page(sb, curr_p);
+		if (curr_p == 0)
+			goto out;
+	}
+
+	curr_p = pos;
+	while (curr_p != pidir->log_tail) {
+		if (goto_next_page(sb, curr_p))
+			curr_p = next_log_page(sb, curr_p);
+
+		if (curr_p == 0) {
+			nova_err(sb, "Dir %lu log is NULL!\n", inode->i_ino);
+			BUG();
+		}
+
+		addr = (void *)nova_get_block(sb, curr_p);
+		type = nova_get_entry_type(addr);
+		switch (type) {
+			case SET_ATTR:
+				curr_p += sizeof(struct nova_setattr_logentry);
+				continue;
+			case LINK_CHANGE:
+				curr_p += sizeof(struct nova_link_change_entry);
+				continue;
+			case DIR_LOG:
+				break;
+			default:
+				nova_dbg("%s: unknown type %d, 0x%llx\n",
+							__func__, type, curr_p);
+				NOVA_ASSERT(0);
+		}
+
+		entry = (struct nova_dentry *)nova_get_block(sb, curr_p);
+		nova_dbgv("curr_p: 0x%llx, type %d, ino %llu, "
+			"name %s, namelen %u, rec len %u\n", curr_p,
+			entry->entry_type, le64_to_cpu(entry->ino),
+			entry->name, entry->name_len,
+			le16_to_cpu(entry->de_len));
+
+		de_len = le16_to_cpu(entry->de_len);
+		if (entry->ino > 0 && entry->invalid == 0) {
+			ino = __le64_to_cpu(entry->ino);
+
+			ret = nova_get_inode_address(sb, ino, &pi_addr, 0);
+			if (ret) {
+				nova_dbg("%s: get child inode %lu address "
+					"failed %d\n", __func__, ino, ret);
+				ctx->pos = pidir->log_tail;
+				return ret;
+			}
+
+			child_pi = nova_get_block(sb, pi_addr);
+			nova_dbgv("ctx: ino %llu, name %s, "
+				"name_len %u, de_len %u\n",
+				(u64)ino, entry->name, entry->name_len,
+				entry->de_len);
+			if (!dir_emit(ctx, entry->name, entry->name_len,
+				ino, IF2DT(le16_to_cpu(child_pi->i_mode)))) {
+				nova_dbgv("Here: pos %llu\n", ctx->pos);
+				return 0;
+			}
+			ctx->pos = curr_p + de_len;
+		}
+
+		if (ret) {
+			nova_err(sb, "%s ERROR %d\n", __func__, ret);
+			break;
+		}
+
+		curr_p += de_len;
+	}
+
+out:
+	NOVA_END_TIMING(readdir_t, readdir_time);
+	return 0;
+}
+
 const struct file_operations nova_dir_operations = {
 	.llseek		= generic_file_llseek,
 	.read		= generic_read_dir,
-	.iterate	= nova_readdir,
+	.iterate	= nova_readdir_fast,
 	.fsync		= noop_fsync,
 	.unlocked_ioctl = nova_ioctl,
 #ifdef CONFIG_COMPAT
