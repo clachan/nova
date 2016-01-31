@@ -1650,24 +1650,24 @@ static int nova_gc_assign_dentry(struct super_block *sb,
 	struct nova_inode_info_header *sih, struct nova_dentry *old_dentry,
 	struct nova_dentry *new_dentry)
 {
-	struct nova_dentry *temp;
-	void **pentry;
+	struct nova_dentry_node *curr = NULL;
 	unsigned long hash;
-	int ret = 0;
+	int ret;
 
 	hash = BKDRHash(old_dentry->name, old_dentry->name_len);
+	ret = nova_find_dentry_node(&sih->dentry_tree, hash, &curr);
+
+	if (ret == 0)
+		return 0;
+
 	nova_dbgv("%s: assign %s hash %lu\n", __func__,
 			old_dentry->name, hash);
 
 	/* FIXME: hash collision ignored here */
-	pentry = radix_tree_lookup_slot(&sih->tree, hash);
-	if (pentry) {
-		temp = radix_tree_deref_slot(pentry);
-		if (temp == old_dentry)
-			radix_tree_replace_slot(pentry, new_dentry);
-	}
+	if (curr->dentry == old_dentry)
+		curr->dentry = new_dentry;
 
-	return ret;
+	return 0;
 }
 
 static int nova_gc_assign_new_entry(struct super_block *sb,

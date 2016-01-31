@@ -50,6 +50,7 @@ static struct super_operations nova_sops;
 static const struct export_operations nova_export_ops;
 static struct kmem_cache *nova_inode_cachep;
 static struct kmem_cache *nova_range_node_cachep;
+static struct kmem_cache *nova_dentry_node_cachep;
 
 /* FIXME: should the following variable be one per NOVA instance? */
 unsigned int nova_dbgmask = 0;
@@ -784,6 +785,11 @@ inline void nova_free_inode_node(struct super_block *sb,
 	nova_free_range_node(node);
 }
 
+inline void nova_free_dentry_node(struct nova_dentry_node *node)
+{
+	kmem_cache_free(nova_dentry_node_cachep, node);
+}
+
 static inline
 struct nova_range_node *nova_alloc_range_node(struct super_block *sb)
 {
@@ -801,6 +807,15 @@ inline struct nova_range_node *nova_alloc_blocknode(struct super_block *sb)
 inline struct nova_range_node *nova_alloc_inode_node(struct super_block *sb)
 {
 	return nova_alloc_range_node(sb);
+}
+
+inline
+struct nova_dentry_node *nova_alloc_dentry_node(struct super_block *sb)
+{
+	struct nova_dentry_node *p;
+	p = (struct nova_dentry_node *)
+		kmem_cache_alloc(nova_dentry_node_cachep, GFP_NOFS);
+	return p;
 }
 
 static struct inode *nova_alloc_inode(struct super_block *sb)
@@ -850,6 +865,17 @@ static int __init init_rangenode_cache(void)
 	return 0;
 }
 
+static int __init init_dentrynode_cache(void)
+{
+	nova_dentry_node_cachep = kmem_cache_create("nova_dentry_node_cache",
+					sizeof(struct nova_dentry_node),
+					0, (SLAB_RECLAIM_ACCOUNT |
+                                        SLAB_MEM_SPREAD), NULL);
+	if (nova_dentry_node_cachep == NULL)
+		return -ENOMEM;
+	return 0;
+}
+
 
 static int __init init_inodecache(void)
 {
@@ -875,6 +901,11 @@ static void destroy_inodecache(void)
 static void destroy_rangenode_cache(void)
 {
 	kmem_cache_destroy(nova_range_node_cachep);
+}
+
+static void destroy_dentrynode_cache(void)
+{
+	kmem_cache_destroy(nova_dentry_node_cachep);
 }
 
 /*
@@ -984,19 +1015,25 @@ static int __init init_nova_fs(void)
 	if (rc)
 		return rc;
 
-	rc = init_inodecache();
+	rc = init_dentrynode_cache();
 	if (rc)
 		goto out1;
 
-	rc = register_filesystem(&nova_fs_type);
+	rc = init_inodecache();
 	if (rc)
 		goto out2;
+
+	rc = register_filesystem(&nova_fs_type);
+	if (rc)
+		goto out3;
 
 	NOVA_END_TIMING(init_t, init_time);
 	return 0;
 
-out2:
+out3:
 	destroy_inodecache();
+out2:
+	destroy_dentrynode_cache();
 out1:
 	destroy_rangenode_cache();
 	return rc;
@@ -1007,6 +1044,7 @@ static void __exit exit_nova_fs(void)
 	unregister_filesystem(&nova_fs_type);
 	destroy_inodecache();
 	destroy_rangenode_cache();
+	destroy_dentrynode_cache();
 }
 
 MODULE_AUTHOR("Andiry Xu <jix024@cs.ucsd.edu>");

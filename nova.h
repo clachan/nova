@@ -300,9 +300,16 @@ struct nova_range_node {
 	unsigned long range_high;
 };
 
+struct nova_dentry_node {
+	struct rb_node node;
+	unsigned long hash;
+	struct nova_dentry *dentry;
+};
+
 struct nova_inode_info_header {
 	struct radix_tree_root tree;	/* Dir name entry tree root */
 	struct radix_tree_root cache_tree;	/* Mmap cache tree root */
+	struct rb_root dentry_tree;
 	unsigned short i_mode;		/* Dir or file? */
 	unsigned long log_pages;	/* Num of log pages */
 	unsigned long i_size;
@@ -901,6 +908,8 @@ int nova_dax_file_mmap(struct file *file, struct vm_area_struct *vma);
 
 /* dir.c */
 extern const struct file_operations nova_dir_operations;
+int nova_find_dentry_node(struct rb_root *tree, unsigned long hash,
+	struct nova_dentry_node **ret_node);
 int nova_append_dir_init_entries(struct super_block *sb,
 	struct nova_inode *pi, u64 self_ino, u64 parent_ino);
 extern int nova_add_dentry(struct dentry *dentry, u64 ino,
@@ -996,6 +1005,8 @@ int nova_check_integrity(struct super_block *sb,
 	struct nova_super_block *super);
 void *nova_ioremap(struct super_block *sb, phys_addr_t phys_addr,
 	ssize_t size);
+inline struct nova_dentry_node *nova_alloc_dentry_node(struct super_block *sb);
+inline void nova_free_dentry_node(struct nova_dentry_node *node);
 
 /* symlink.c */
 extern const struct inode_operations nova_symlink_inode_operations;

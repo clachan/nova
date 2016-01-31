@@ -22,25 +22,117 @@
 #define DT2IF(dt) (((dt) << 12) & S_IFMT)
 #define IF2DT(sif) (((sif) & S_IFMT) >> 12)
 
+static inline int nova_rbtree_compare_dentry_node(struct nova_dentry_node *curr,
+	unsigned long hash)
+{
+	if (hash < curr->hash)
+		return -1;
+	if (hash > curr->hash)
+		return 1;
+
+	return 0;
+}
+
+int nova_find_dentry_node(struct rb_root *tree, unsigned long hash,
+	struct nova_dentry_node **ret_node)
+{
+	struct nova_dentry_node *curr = NULL;
+	struct rb_node *temp;
+	int compVal;
+	int ret = 0;
+
+	temp = tree->rb_node;
+
+	while (temp) {
+		curr = container_of(temp, struct nova_dentry_node, node);
+		compVal = nova_rbtree_compare_dentry_node(curr, hash);
+
+		if (compVal == -1) {
+			temp = temp->rb_left;
+		} else if (compVal == 1) {
+			temp = temp->rb_right;
+		} else {
+			ret = 1;
+			break;
+		}
+	}
+
+	*ret_node = curr;
+	return ret;
+}
+
+static int nova_insert_dentry_node(struct rb_root *tree,
+	struct nova_dentry_node *new_node)
+{
+	struct nova_dentry_node *curr;
+	struct rb_node **temp, *parent;
+	int compVal;
+
+	temp = &(tree->rb_node);
+	parent = NULL;
+
+	while (*temp) {
+		curr = container_of(*temp, struct nova_dentry_node, node);
+		compVal = nova_rbtree_compare_dentry_node(curr,
+						new_node->hash);
+		parent = *temp;
+
+		if (compVal == -1) {
+			temp = &((*temp)->rb_left);
+		} else if (compVal == 1) {
+			temp = &((*temp)->rb_right);
+		} else {
+			nova_dbg("%s: entry hash %lu already exists\n",
+				__func__, new_node->hash);
+			return -EINVAL;
+		}
+	}
+
+	rb_link_node(&new_node->node, parent, temp);
+	rb_insert_color(&new_node->node, tree);
+
+	return 0;
+}
+
+static void nova_destroy_dentry_node_tree(struct super_block *sb,
+	struct rb_root *tree)
+{
+	struct nova_dentry_node *curr;
+	struct rb_node *temp;
+
+	temp = rb_first(tree);
+	while (temp) {
+		curr = container_of(temp, struct nova_dentry_node, node);
+		temp = rb_next(temp);
+		rb_erase(&curr->node, tree);
+		nova_free_dentry_node(curr);
+	}
+}
+
 struct nova_dentry *nova_find_dentry(struct super_block *sb,
 	struct nova_inode *pi, struct inode *inode, const char *name,
 	unsigned long name_len)
 {
 	struct nova_inode_info *si = NOVA_I(inode);
 	struct nova_inode_info_header *sih = &si->header;
-	struct nova_dentry *direntry;
+	struct nova_dentry_node *curr = NULL;
 	unsigned long hash;
+	int ret;
 
 	hash = BKDRHash(name, name_len);
-	direntry = radix_tree_lookup(&sih->tree, hash);
+	ret = nova_find_dentry_node(&sih->dentry_tree, hash, &curr);
 
-	return direntry;
+	if (ret == 0)
+		return NULL;
+
+	return curr->dentry;
 }
 
-static int nova_insert_dir_radix_tree(struct super_block *sb,
+static int nova_insert_dir_tree(struct super_block *sb,
 	struct nova_inode_info_header *sih, const char *name,
 	int namelen, struct nova_dentry *direntry)
 {
+	struct nova_dentry_node *curr = NULL;
 	unsigned long hash;
 	int ret;
 
@@ -48,7 +140,15 @@ static int nova_insert_dir_radix_tree(struct super_block *sb,
 	nova_dbgv("%s: insert %s hash %lu\n", __func__, name, hash);
 
 	/* FIXME: hash collision ignored here */
-	ret = radix_tree_insert(&sih->tree, hash, direntry);
+	curr = nova_alloc_dentry_node(sb);
+	if (!curr) {
+		/* returning without freeing the block*/
+		return -ENOMEM;
+	}
+
+	curr->hash = hash;
+	curr->dentry = direntry;
+	ret = nova_insert_dentry_node(&sih->dentry_tree, curr);
 	if (ret)
 		nova_dbg("%s ERROR %d: %s\n", __func__, ret, name);
 
@@ -64,15 +164,22 @@ static int nova_check_dentry_match(struct super_block *sb,
 	return strncmp(dentry->name, name, namelen);
 }
 
-static int nova_remove_dir_radix_tree(struct super_block *sb,
+static int nova_remove_dir_tree(struct super_block *sb,
 	struct nova_inode_info_header *sih, const char *name, int namelen,
 	int replay)
 {
+	struct nova_dentry_node *curr = NULL;
 	struct nova_dentry *entry;
 	unsigned long hash;
+	int ret;
 
 	hash = BKDRHash(name, namelen);
-	entry = radix_tree_delete(&sih->tree, hash);
+	ret = nova_find_dentry_node(&sih->dentry_tree, hash, &curr);
+
+	if (ret == 0)
+		return -EEXIST;
+
+	entry = curr->dentry;
 
 	if (replay == 0) {
 		if (!entry) {
@@ -99,44 +206,18 @@ static int nova_remove_dir_radix_tree(struct super_block *sb,
 		entry->invalid = 1;
 	}
 
+	rb_erase(&curr->node, &sih->dentry_tree);
+	nova_free_dentry_node(curr);
 	return 0;
 }
 
 void nova_delete_dir_tree(struct super_block *sb,
 	struct nova_inode_info_header *sih)
 {
-	struct nova_dentry *direntry;
-	unsigned long pos = 0;
-	struct nova_dentry *entries[FREE_BATCH];
 	timing_t delete_time;
-	int nr_entries;
-	int i;
-	void *ret;
 
 	NOVA_START_TIMING(delete_dir_tree_t, delete_time);
-
-	do {
-		nr_entries = radix_tree_gang_lookup(&sih->tree,
-					(void **)entries, pos, FREE_BATCH);
-		for (i = 0; i < nr_entries; i++) {
-			direntry = entries[i];
-			BUG_ON(!direntry);
-			pos = BKDRHash(direntry->name, direntry->name_len);
-			ret = radix_tree_delete(&sih->tree, pos);
-			if (!ret || ret != direntry) {
-				nova_err(sb, "dentry: type %d, inode %llu, "
-					"name %s, namelen %u, rec len %u\n",
-					direntry->entry_type,
-					le64_to_cpu(direntry->ino),
-					direntry->name, direntry->name_len,
-					le16_to_cpu(direntry->de_len));
-				if (!ret)
-					nova_dbg("ret is NULL\n");
-			}
-		}
-		pos++;
-	} while (nr_entries == FREE_BATCH);
-
+	nova_destroy_dentry_node_tree(sb, &sih->dentry_tree);
 	NOVA_END_TIMING(delete_dir_tree_t, delete_time);
 	return;
 }
@@ -298,7 +379,7 @@ int nova_add_dentry(struct dentry *dentry, u64 ino, int inc_link,
 				&curr_tail);
 
 	direntry = (struct nova_dentry *)nova_get_block(sb, curr_entry);
-	ret = nova_insert_dir_radix_tree(sb, sih, name, namelen, direntry);
+	ret = nova_insert_dir_tree(sb, sih, name, namelen, direntry);
 	*new_tail = curr_tail;
 	NOVA_END_TIMING(add_dentry_t, add_dentry_time);
 	return ret;
@@ -334,7 +415,7 @@ int nova_remove_dentry(struct dentry *dentry, int dec_link, u64 tail,
 				dentry, loglen, tail, dec_link, &curr_tail);
 	*new_tail = curr_tail;
 
-	nova_remove_dir_radix_tree(sb, sih, entry->name, entry->len, 0);
+	nova_remove_dir_tree(sb, sih, entry->name, entry->len, 0);
 	NOVA_END_TIMING(remove_dentry_t, remove_dentry_time);
 	return 0;
 }
@@ -346,7 +427,7 @@ inline int nova_replay_add_dentry(struct super_block *sb,
 		return -EINVAL;
 
 	nova_dbg_verbose("%s: add %s\n", __func__, entry->name);
-	return nova_insert_dir_radix_tree(sb, sih,
+	return nova_insert_dir_tree(sb, sih,
 			entry->name, entry->name_len, entry);
 }
 
@@ -355,7 +436,7 @@ inline int nova_replay_remove_dentry(struct super_block *sb,
 	struct nova_dentry *entry)
 {
 	nova_dbg_verbose("%s: remove %s\n", __func__, entry->name);
-	nova_remove_dir_radix_tree(sb, sih, entry->name,
+	nova_remove_dir_tree(sb, sih, entry->name,
 					entry->name_len, 1);
 	return 0;
 }
@@ -499,14 +580,13 @@ static int nova_readdir(struct file *file, struct dir_context *ctx)
 	struct nova_inode_info *si = NOVA_I(inode);
 	struct nova_inode_info_header *sih = &si->header;
 	struct nova_inode *child_pi;
+	struct nova_dentry_node *curr = NULL;
 	struct nova_dentry *entry;
-	struct nova_dentry *entries[FREE_BATCH];
-	int nr_entries;
+	struct rb_node *temp;
 	u64 pi_addr;
 	unsigned long pos = 0;
 	ino_t ino;
-	int i;
-	int ret;
+	int ret = 0;
 	timing_t readdir_time;
 
 	NOVA_START_TIMING(readdir_t, readdir_time);
@@ -519,29 +599,35 @@ static int nova_readdir(struct file *file, struct dir_context *ctx)
 		nova_dbg("%s: inode %lu sih does not exist!\n",
 				__func__, inode->i_ino);
 		ctx->pos = READDIR_END;
-		return 0;
+		goto out;
 	}
 
 	pos = ctx->pos;
 	if (pos == READDIR_END)
 		goto out;
 
-	do {
-		nr_entries = radix_tree_gang_lookup(&sih->tree,
-					(void **)entries, pos, FREE_BATCH);
-		for (i = 0; i < nr_entries; i++) {
-			entry = entries[i];
-			pos = BKDRHash(entry->name, entry->name_len);
+	ret = nova_find_dentry_node(&sih->dentry_tree, pos, &curr);
+	if (!curr)
+		goto out;
+
+	temp = &curr->node;
+	if (curr->hash < pos)
+		temp = rb_next(temp);
+
+	while (temp) {
+		curr = container_of(temp, struct nova_dentry_node, node);
+
+		entry = curr->dentry;
+
+		if (entry->ino > 0 && entry->invalid == 0) {
 			ino = __le64_to_cpu(entry->ino);
-			if (ino == 0)
-				continue;
 
 			ret = nova_get_inode_address(sb, ino, &pi_addr, 0);
 			if (ret) {
 				nova_dbg("%s: get child inode %lu address "
 					"failed %d\n", __func__, ino, ret);
 				ctx->pos = READDIR_END;
-				return ret;
+				goto out;
 			}
 
 			child_pi = nova_get_block(sb, pi_addr);
@@ -552,16 +638,18 @@ static int nova_readdir(struct file *file, struct dir_context *ctx)
 			if (!dir_emit(ctx, entry->name, entry->name_len,
 				ino, IF2DT(le16_to_cpu(child_pi->i_mode)))) {
 				nova_dbgv("Here: pos %llu\n", ctx->pos);
-				return 0;
+				goto out;
 			}
-			ctx->pos = pos + 1;
+			ctx->pos = curr->hash + 1;
+			readdir_valid_dentries++;
 		}
-		pos++;
-	} while (nr_entries == FREE_BATCH);
+
+		temp = rb_next(temp);
+	}
 
 out:
 	NOVA_END_TIMING(readdir_t, readdir_time);
-	return 0;
+	return ret;
 }
 
 static int nova_readdir_fast(struct file *file, struct dir_context *ctx)
@@ -681,11 +769,6 @@ static int nova_readdir_fast(struct file *file, struct dir_context *ctx)
 			readdir_valid_dentries++;
 		}
 
-		if (ret) {
-			nova_err(sb, "%s ERROR %d\n", __func__, ret);
-			break;
-		}
-
 		curr_p += de_len;
 	}
 
@@ -697,7 +780,7 @@ out:
 const struct file_operations nova_dir_operations = {
 	.llseek		= generic_file_llseek,
 	.read		= generic_read_dir,
-	.iterate	= nova_readdir_fast,
+	.iterate	= nova_readdir,
 	.fsync		= noop_fsync,
 	.unlocked_ioctl = nova_ioctl,
 #ifdef CONFIG_COMPAT
