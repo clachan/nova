@@ -376,7 +376,7 @@ static int nova_munmap(struct file *file, struct vm_area_struct *vma,
 	size_t size = end - (start & (PAGE_SIZE - 1));
 
 	 /* Issue a msync() on munmap */
-	nova_dbg("%s\n", __func__);
+	nova_dbgv("%s\n", __func__);
 	if (mapping_mapped(mapping)) {
 		start = pgoff << PAGE_SHIFT;
 		end = start + size;
